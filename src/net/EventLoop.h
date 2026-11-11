@@ -14,9 +14,10 @@ class TcpConnection;
 /**
  * @brief 封装使用ET模式的epoll系统调用的纯事件循环
  *
- * EventLoop 是纯事件循环（epoll + eventfd + pendings + 三个连接回调）：
+ * EventLoop 是纯事件循环（epoll + eventfd + pendings）：
  *  - 监听 fd 等非连接 fd 用 addReadHandler 注册通用读回调；
- *  - 连接经 TcpConnection::start() → addConnection 挂进 _connections；
+ *  - 连接经 TcpConnection::start() → addConnection 挂进 _connections，
+ *    三个业务回调挂在 TcpConnection 上；
  *  - 跨线程投递唯一入口是 queueInLoop（入队 + 写 eventfd 唤醒）；
  *  - quit() 线程安全：置原子标志 + 写 eventfd，阻塞中的 epoll_wait 立即返回。
  */
@@ -26,7 +27,6 @@ class EventLoop
     static const int timeout = 3000;                                             // epoll超时时间参数
     static const int eventNum = 10;                                              // epoll监听事件数最大值
     using TcpConnectionPtr = std::shared_ptr<TcpConnection>;                     // std::shared_ptr指针管理Tcp连接指针对象
-    using TcpConnectionCallback = std::function<void(const TcpConnectionPtr &)>; // 三个事件回调函数
     using Functor = std::function<void(void)>;                                   // 任务
 
 public:
@@ -37,11 +37,6 @@ public:
     void loop();
     // 结束循环（线程安全）：置标志后写 eventfd 唤醒，立即退出
     void quit();
-
-    // 注册三个回调函数，用于传给每一个TcpConnection连接
-    void setOnConnection(TcpConnectionCallback &&cb);
-    void setOnMessage(TcpConnectionCallback &&cb);
-    void setOnClose(TcpConnectionCallback &&cb);
 
     // 归属线程内联执行；其他线程转 queueInLoop
     void runInLoop(Functor &&fc);
@@ -60,7 +55,7 @@ public:
     void popWriteEvent(int fd);
 
     // 连接表管理：只允许归属 loop 线程调用
-    // addConnection：挂进连接表、注册读事件、给连接注册三回调并触发 onConnection
+    // addConnection：挂进连接表、注册读事件、触发 onConnection（回调挂在连接上）
     void addConnection(const TcpConnectionPtr &tp);
     // removeConnection：摘 epoll → 出连接表 → 触发 onClose
     void removeConnection(int fd);
@@ -99,10 +94,6 @@ private:
     std::vector<struct epoll_event> _events;       // 就绪事件数组
     std::map<int, TcpConnectionPtr> _connections;  // Tcp连接池
     std::map<int, Functor> _ioHandlers;            // 监听 fd 等非连接 fd 的读回调
-
-    TcpConnectionCallback _onConnection; // 连接建立
-    TcpConnectionCallback _onMessage;    // 消息到来
-    TcpConnectionCallback _onClose;      // 连接断开
 
     int _evfd;                      // 特殊的文件描述符，用于线程间通信
     std::vector<Functor> _pendings; // 存放EventLoop需要执行的任务

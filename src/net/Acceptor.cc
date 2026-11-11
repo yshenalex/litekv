@@ -33,7 +33,7 @@ int Acceptor::accept()
     logMessage(DEBUG, "ing accept, connfd = %d", connfd);
     if (-1 == connfd)
     {
-        // ET模式下返回-1可能是正常情况，具体要看errno的结果，交给调用accept的TcpServer::acceptLoop判断
+        // ET模式下返回-1可能是正常情况，具体要看errno的结果，由调用方的 accept 循环判断
         return -1;
     }
 

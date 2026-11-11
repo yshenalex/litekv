@@ -180,8 +180,9 @@ void EventLoop::handlerMessage(int fd)
     if (!tp->receive())
     {
         // 读路径遇 EOF（对端半关闭）或出错：本次已读入的数据先交给上层处理，
-        // 再"输出冲刷完即关闭"（缓冲为空则立即关闭）
-        if (tp->_inBuffer.length() > 0)
+        // 再"输出冲刷完即关闭"（缓冲为空则立即关闭）；receive() 内部已关闭的（如输入
+        // 超限）不再投递
+        if (tp->connected() && tp->inputBuffer().length() > 0)
             tp->handleOnMessageCallback();
         tp->closeAfterFlush();
         logMessage(NORMAL, "connection [fd = %d] EOF, closing", fd);
@@ -199,7 +200,7 @@ void EventLoop::handlerRemainSend(int fd)
     auto it = _connections.find(fd);
     if (it != _connections.end())
     {
-        it->second->send(); // 内部处理发完后的取消写事件/延迟关闭
+        it->second->handleWrite(); // 内部处理发完后的取消写事件/延迟关闭
     }
 
     logMessage(DEBUG, "out handlerRemainSend, fd = %d", fd);
@@ -212,9 +213,10 @@ void EventLoop::closeConnection(int fd)
         return;
 
     TcpConnectionPtr tp = it->second;
-    delEpEventfd(fd);      // 先从epoll中取消监听
+    tp->markClosed();       // 标记连接已失效
+    delEpEventfd(fd);       // 先从epoll中取消监听
     _connections.erase(it); // 再从连接池中清除
-    logMessage(NORMAL, "erase TcpConnection fd = %d from _connections", fd);
+    logMessage(NORMAL, "erase TcpConnection fd = %d from _connections, loop = %p", fd, static_cast<void *>(this));
     tp->handleOnCloseCallback(); // 最后触发断开回调（tp 仍持有对象，安全）
 }
 
@@ -238,19 +240,6 @@ void EventLoop::quit()
 bool EventLoop::isInLoopThread() const
 {
     return std::this_thread::get_id() == _tid;
-}
-
-void EventLoop::setOnConnection(TcpConnectionCallback &&cb)
-{
-    _onConnection = std::move(cb);
-}
-void EventLoop::setOnMessage(TcpConnectionCallback &&cb)
-{
-    _onMessage = std::move(cb);
-}
-void EventLoop::setOnClose(TcpConnectionCallback &&cb)
-{
-    _onClose = std::move(cb);
 }
 
 void EventLoop::runInLoop(Functor &&fc)
@@ -333,12 +322,8 @@ void EventLoop::doPendings()
 void EventLoop::addConnection(const TcpConnectionPtr &tp)
 {
     int fd = tp->fd();
-    tp->setOnConnection(_onConnection);
-    tp->setOnMessage(_onMessage);
-    tp->setOnClose(_onClose);
-
     _connections.insert(std::make_pair(fd, tp)); // 加入Tcp连接池中
-    logMessage(NORMAL, "add TcpConnection[fd = %d] in _connections", fd);
+    logMessage(NORMAL, "add TcpConnection[fd = %d] in _connections, loop = %p", fd, static_cast<void *>(this));
 
     addEpReadfd(fd); // 加入epoll监听
 
