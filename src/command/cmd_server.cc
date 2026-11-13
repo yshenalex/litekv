@@ -53,6 +53,16 @@ RespValue cmdInfo(CommandContext &ctx, const std::vector<RespValue> &args)
     return out;
 }
 
+// ---- ECHO message → 原样返回 ----
+// 工具兼容性命令（redis 有）：redis-cli --pipe 的进度探针依赖它——--pipe 周期性
+// 发 ECHO <随机负载> 同步读写进度，缺了会报 unknown command 并触发 30s 无进度
+// 看门狗（exit 1）。不是业务命令，不计 20 条核心命令
+RespValue cmdEcho(CommandContext &ctx, const std::vector<RespValue> &args)
+{
+    (void)ctx;
+    return valBulk(args[1].str);
+}
+
 } // namespace
 
 void registerServerCommands(CommandTable &t)
@@ -61,4 +71,5 @@ void registerServerCommands(CommandTable &t)
     t.reg("flushdb", {cmdFlushdb, 1, true, true});
     t.reg("command", {cmdCommand, -1, false, true});
     t.reg("info", {cmdInfo, -1, false, true});
+    t.reg("echo", {cmdEcho, 2, false, true});
 }
