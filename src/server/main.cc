@@ -3,8 +3,9 @@
  * @brief 组装入口：解析命令行 → 建 Config/Store/CommandTable/Persistence/Server
  *        → 信号处理与生命周期。
  *
- * 用法：./kvserver [port] [subReactors]
+ * 用法：./kvserver [port] [subReactors] [appendonly]
  *   subReactors 省略时用 hardware_concurrency()；显式传 0 是单 Reactor 模式。
+ *   appendonly 取 0/1（默认 1）；0 用 NullPersistence（压测对照、纯缓存场景）。
  * 业务接线（P5）：RESP 解析 → CommandTable::dispatch → 编码回包（CALL-CONVENTIONS §10.1）；
  * 写命令经 ctx.onWrite → persistence->append（CommitHook 锁内）；
  * 启动时 persistence->load() 回放 AOF，关闭时 flush()。
@@ -56,6 +57,9 @@ int main(int argc, char **argv)
     }
     if (argc > 2) {
         cfg.subReactors = static_cast<size_t>(std::strtoul(argv[2], nullptr, 10));
+    }
+    if (argc > 3) {
+        cfg.appendOnly = std::strtoul(argv[3], nullptr, 10) != 0;
     }
     if (!validateConfig(cfg)) {
         std::cerr << "invalid config: port = " << cfg.port
