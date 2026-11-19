@@ -3,15 +3,21 @@
  * @brief 组装入口：解析命令行 → 建 Config/Store/CommandTable/Persistence/Server
  *        → 信号处理与生命周期。
  *
- * 用法：./kvserver [port] [subReactors] [appendonly]
+ * 用法：./litekv-server [conf-file] [port] [subReactors] [appendonly]
+ *   首个参数是纯数字按端口处理，否则视为配置文件路径（Redis 风格 key value，
+ *   见 Config.hpp 头注释；配置文件名不能是纯数字）。优先级：内置默认 <
+ *   配置文件 < 命令行位置参数。
  *   subReactors 省略时用 hardware_concurrency()；显式传 0 是单 Reactor 模式。
  *   appendonly 取 0/1（默认 1）；0 用 NullPersistence（压测对照、纯缓存场景）。
+ *   dir 是数据目录：校验通过后 chdir 进入，aof/日志的相对路径都落那里
+ *   （配置文件里相对路径的解析基准是启动目录，读取发生在 chdir 之前）。
  * 业务接线（P5）：RESP 解析 → CommandTable::dispatch → 编码回包（CALL-CONVENTIONS §10.1）；
  * 写命令经 ctx.onWrite → persistence->append（CommitHook 锁内）；
  * 启动时 persistence->load() 回放 AOF，关闭时 flush()。
  */
 
 #include <cctype>
+#include <cerrno>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -23,6 +29,7 @@
 #include <pthread.h>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "AofPlugin.h"
@@ -51,19 +58,42 @@ std::string toLower(const std::string &s)
 
 int main(int argc, char **argv)
 {
+    // 优先级：内置默认 < 配置文件 < 命令行位置参数。首个参数非纯数字时按配置
+    // 文件处理（配置文件名不能是纯数字），其余参数仍按 port/subReactors/appendonly
     Config cfg;
-    if (argc > 1) {
-        cfg.port = static_cast<uint16_t>(std::strtoul(argv[1], nullptr, 10));
+    int argi = 1;
+    if (argi < argc) {
+        const std::string a1(argv[argi]);
+        const bool numeric =
+            !a1.empty() && a1.find_first_not_of("0123456789") == std::string::npos;
+        if (!numeric) {
+            std::string err;
+            if (!loadConfigFile(a1, cfg, &err)) {
+                std::cerr << "config error: " << err << std::endl;
+                return 1;
+            }
+            ++argi;
+        }
     }
-    if (argc > 2) {
-        cfg.subReactors = static_cast<size_t>(std::strtoul(argv[2], nullptr, 10));
+    if (argi < argc) {
+        cfg.port = static_cast<uint16_t>(std::strtoul(argv[argi], nullptr, 10));
     }
-    if (argc > 3) {
-        cfg.appendOnly = std::strtoul(argv[3], nullptr, 10) != 0;
+    if (argi + 1 < argc) {
+        cfg.subReactors = static_cast<size_t>(std::strtoul(argv[argi + 1], nullptr, 10));
     }
-    if (!validateConfig(cfg)) {
-        std::cerr << "invalid config: port = " << cfg.port
-                  << ", subReactors = " << cfg.subReactors << std::endl;
+    if (argi + 2 < argc) {
+        cfg.appendOnly = std::strtoul(argv[argi + 2], nullptr, 10) != 0;
+    }
+    std::string cfgErr;
+    if (!validateConfig(cfg, &cfgErr)) {
+        std::cerr << "invalid config: " << cfgErr << std::endl;
+        return 1;
+    }
+
+    // 数据目录：chdir 后 aof/日志的相对路径都落进 dir（Redis `dir` 同款语义）。
+    // 必须在 AofPlugin 打开 aof、第一条日志落盘之前完成
+    if (::chdir(cfg.dir.c_str()) != 0) {
+        std::cerr << "chdir(" << cfg.dir << "): " << std::strerror(errno) << std::endl;
         return 1;
     }
 
@@ -187,9 +217,10 @@ int main(int argc, char **argv)
         std::cerr << "server start failed, port = " << cfg.port << std::endl;
         return 1;
     }
-    std::cout << "kvserver listening on " << cfg.ip << ":" << cfg.port
+    std::cout << "litekv-server listening on " << cfg.ip << ":" << cfg.port
               << ", subReactors = " << cfg.subReactors
-              << ", appendonly = " << (cfg.appendOnly ? "yes" : "no") << std::endl;
+              << ", appendonly = " << (cfg.appendOnly ? "yes" : "no")
+              << ", dir = " << cfg.dir << std::endl;
 
     // P5：AOF 重写线程——独立于 fsync 线程与命令路径（§9.3：maybeRewrite 只能由
     // 重写线程/主循环触发）。每秒检查阈值（文件 > 上次重写后 2 倍且 > 64MB）
